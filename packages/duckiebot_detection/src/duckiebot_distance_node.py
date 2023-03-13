@@ -26,7 +26,7 @@ class DuckiebotDistanceNode(DTROS):
         super(DuckiebotDistanceNode, self).__init__(node_name=node_name, node_type=NodeType.PERCEPTION)
         self.host = str(os.environ['VEHICLE_NAME'])
 	
-	#Distance between the centers of the circles on the back
+	    #Distance between the centers of the circles on the back
         self.distance_between_centers = 0.0125
         
         #Maximum tolerable reprojection error.

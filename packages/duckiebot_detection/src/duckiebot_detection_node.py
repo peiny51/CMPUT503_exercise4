@@ -58,6 +58,8 @@ class DuckiebotDetectionNode(DTROS):
         self.pub_circlepattern_image = rospy.Publisher("/{}/duckiebot_detection_node/detection_image/compressed".format(self.host), CompressedImage, queue_size=1)
         self.pub_detection = rospy.Publisher("/{}/duckiebot_detection_node/detection".format(self.host), BoolStamped, queue_size=1)
         self.log("Detection Initialization completed.")
+        
+        
 
     def cbParametersChanged(self):
 
@@ -108,15 +110,21 @@ class DuckiebotDetectionNode(DTROS):
         # otherwise publish a message saying that it was unsuccessful
         if detection > 0:
             points_list = []
+            min_x = 100000
+            min_y = -1
             for point in centers:
                 center = Point32()
                 center.x = point[0, 0]
                 center.y = point[0, 1]
                 center.z = 0
+                if center.x < min_x:
+                    min_x = center.x
+                    min_y = center.y
                 points_list.append(center)
             vehicle_centers_msg_out.corners = points_list
             vehicle_centers_msg_out.H = self.circlepattern_dims[1]
             vehicle_centers_msg_out.W = self.circlepattern_dims[0]
+            rospy.loginfo(f'X: {min_x}, Y: {min_y}')
 
         self.pub_centers.publish(vehicle_centers_msg_out)
         self.pub_detection.publish(detection_flag_msg_out)

@@ -4,5 +4,5 @@
 
     <node  name="duckiebot_detection_node" pkg="$(arg pkg_name)" type="duckiebot_detection_node.py" output="screen"></node>
     <node  name="duckiebot_distance_node" pkg="$(arg pkg_name)" type="duckiebot_distance_node.py" output="screen" ></node>
-
+    <node  type="lane_following_node.py" name="lane_following_node" output="screen"></node> 
 </launch>
