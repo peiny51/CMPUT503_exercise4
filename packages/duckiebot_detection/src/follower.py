@@ -49,24 +49,23 @@ class LaneFollowNode(DTROS):
         self.vel_pub = rospy.Publisher("/" + self.veh + "/car_cmd_switch_node/cmd",
                                        Twist2DStamped,
                                        queue_size=1)
+        self.pub_car_commands = rospy.Publisher(f"/{self.veh_name}/car_cmd_switch_node/cmd", Twist2DStamped, queue_size=1)
+        self.pub_augmented_image = rospy.Publisher(f'/{self.veh_name}/lane_following_node/image/compressed', CompressedImage, queue_size=1)
+        
         # Subscribers
         self.sub = rospy.Subscriber("/" + self.veh + "/camera_node/image/compressed",
                                     CompressedImage,
                                     self.callback,
                                     queue_size=1,
                                     buff_size="20MB")
-        
-        # Subscriber
-        # self.sub_image_compressed = rospy.Subscriber(f"/{self.veh_name}/camera_node/image/compressed", CompressedImage, self.cb_compressed_image)
         self.sub_x = rospy.Subscriber("/{}/duckiebot_detection_node/x".format(self.host), Float32, self.cb_x, queue_size=1)
         self.sub_detection = rospy.Subscriber("/{}/duckiebot_detection_node/detection".format(self.host), BoolStamped, self.cb_detection, queue_size=1)
         self.sub_distance_to_robot_ahead = rospy.Subscriber("/{}/duckiebot_distance_node/distance".format(self.host), Float32, self.cb_distance, queue_size=1)
-        self.compressed_image_cache = None
-        
-        # Publisher
-        # self.pub_executed_commands = rospy.Publisher("/{}/wheels_driver_node/wheels_cmd".format(self.veh_name), WheelsCmdStamped, queue_size=1)
-        self.pub_car_commands = rospy.Publisher(f"/{self.veh_name}/car_cmd_switch_node/cmd", Twist2DStamped, queue_size=1)
-        self.pub_augmented_image = rospy.Publisher(f'/{self.veh_name}/lane_following_node/image/compressed', CompressedImage, queue_size=1)
+        self.right_tick_sub = rospy.Subscriber(f'/{self.veh_name}/right_wheel_encoder_node/tick', 
+        WheelEncoderStamped, self.right_tick,  queue_size = 1)
+        self.left_tick_sub = rospy.Subscriber(f'/{self.veh_name}/left_wheel_encoder_node/tick', 
+        WheelEncoderStamped, self.left_tick,  queue_size = 1)
+        self.r = rospy.get_param(f'/{self.veh_name}/kinematics_node/radius', 100)
         
         # Assistant module
         self.bridge = CvBridge()
@@ -90,12 +89,7 @@ class LaneFollowNode(DTROS):
         self.last_error = 0
         self.last_time = rospy.get_time()
 
-        self.right_tick_sub = rospy.Subscriber(f'/{self.veh_name}/right_wheel_encoder_node/tick', 
-        WheelEncoderStamped, self.right_tick,  queue_size = 1)
-        self.left_tick_sub = rospy.Subscriber(f'/{self.veh_name}/left_wheel_encoder_node/tick', 
-        WheelEncoderStamped, self.left_tick,  queue_size = 1)
-        self.r = rospy.get_param(f'/{self.veh_name}/kinematics_node/radius', 100)
-
+        
         self.rt_initial_set = False
         self.rt = 0
         self.rt_initial_val = 0
@@ -119,7 +113,6 @@ class LaneFollowNode(DTROS):
         self.rt = msg.data - self.rt_initial_val
         # self.rt_dist = (2 * pi * self.r * self.rt_val) / 135
 
-
     def left_tick(self, msg):
         if not self.lt_initial_set:
             self.lt_initial_set = True
@@ -127,6 +120,9 @@ class LaneFollowNode(DTROS):
         self.lt = msg.data - self.lt_initial_val
         
     def cb_x(self, x):
+        """
+        call back function for x cordinate of center of leader's back
+        """
         self.x = x.data
         # if x < 233:
         #     self.vehicle_direction = -1
@@ -139,9 +135,15 @@ class LaneFollowNode(DTROS):
         #     self.turn_right()
     
     def cb_detection(self, bool_stamped):
+        """
+        call back function for leader detection
+        """
         self.detection = bool_stamped.data 
             
     def cb_distance(self, distance):
+        """
+        call back function for leader distance
+        """
         self.distance = 100 * (distance.data)
         rospy.loginfo(f'Distance from the robot in front: {self.distance}')
         
@@ -151,6 +153,9 @@ class LaneFollowNode(DTROS):
             self.vehicle_ahead = False
 
     def lane_follow(self, image_hsv, crop_width, crop):
+        """
+        detect yellow line to do lane following
+        """
         mask = cv2.inRange(image_hsv, ROAD_MASK[0], ROAD_MASK[1])
         crop = cv2.bitwise_and(crop, crop, mask=mask)
         contours, hierarchy = cv2.findContours(mask,
@@ -193,7 +198,7 @@ class LaneFollowNode(DTROS):
 
         if not self.process_intersection:
             # image_hsv = image_hsv[60:,:,:]
-            
+            # red line detection
             lower_red = np.array([0,50,50])
             upper_red = np.array([10,255,255])
             mask0 = cv2.inRange(image_hsv, lower_red, upper_red)
@@ -235,6 +240,9 @@ class LaneFollowNode(DTROS):
         self.lane_follow(image_hsv, crop_width, crop)
 
     def callback(self, msg):
+        """
+        call back function for compressed image
+        """
         img = self.jpeg.decode(msg.data)
         crop = img[300:-1, :, :]
         crop_width = crop.shape[1]
@@ -268,6 +276,9 @@ class LaneFollowNode(DTROS):
             
 
     def drive(self):
+        """
+        use PID to drive
+        """
         if self.proportional is None:
             self.twist.omega = 0
         else:
