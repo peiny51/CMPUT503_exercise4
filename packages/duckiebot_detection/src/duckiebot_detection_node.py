@@ -110,26 +110,21 @@ class DuckiebotDetectionNode(DTROS):
 
         # if the detection is successful add the information about it,
         # otherwise publish a message saying that it was unsuccessful
-        min_x = 100000
+        avg_x = 0
         if detection > 0:
             points_list = []
-            min_x = 100000
-            min_y = -1
             for point in centers:
                 center = Point32()
                 center.x = point[0, 0]
+                avg_x += center.x
                 center.y = point[0, 1]
                 center.z = 0
-                if center.x < min_x:
-                    min_x = center.x
-                    min_y = center.y
                 points_list.append(center)
             vehicle_centers_msg_out.corners = points_list
             vehicle_centers_msg_out.H = self.circlepattern_dims[1]
             vehicle_centers_msg_out.W = self.circlepattern_dims[0]
-            rospy.loginfo(f'X: {min_x}, Y: {min_y}')
-
-        self.pub_x.publish(min_x)
+            avg_x /= len(centers)
+        self.pub_x.publish(avg_x)
         self.pub_centers.publish(vehicle_centers_msg_out)
         self.pub_detection.publish(detection_flag_msg_out)
         if self.pub_circlepattern_image.get_num_connections() > 0:

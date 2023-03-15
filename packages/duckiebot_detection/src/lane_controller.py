@@ -20,6 +20,9 @@ class LaneController:
             self.integral_err = 0.0
         self.integral_err = max(-self.bound, min(self.integral_err, self.bound))
 
+    def set_v(self, v):
+        self.v = v
+        
     def getNextCommand(self, target_point, current_point):
         # compute dt
         current_t = rospy.Time.now().to_sec()

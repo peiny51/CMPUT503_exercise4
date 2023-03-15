@@ -8,12 +8,13 @@ from std_msgs.msg import Float32
 from turbojpeg import TurboJPEG
 import cv2
 import numpy as np
-from duckietown_msgs.msg import WheelsCmdStamped, Twist2DStamped, BoolStamped, VehicleCorners
+from duckietown_msgs.msg import WheelsCmdStamped, Twist2DStamped, BoolStamped, VehicleCorners, WheelEncoderStamped
 import os
 from cv_bridge import CvBridge
 from duckietown.dtros import DTROS, NodeType
 from geometry_msgs.msg import Point32
 import time
+from math import pi
 
 ROAD_MASK = [(20, 60, 0), (50, 255, 255)]
 RED_MASK = [(151, 155, 84), (179, 255, 255)]
@@ -30,16 +31,12 @@ class LaneFollowNode(DTROS):
         self.veh = rospy.get_param("~veh")
         self.height_ratio = 0.8
         self.height_ratio_red = 0.8
-        self.stop_time = 0.0
-        self.stop_cooldown = 3.0
-        self.stop_duration = 1.5
+        
+        self.move = True
+        self.safe_dist = 30
         
         self.detection = False  # detect tag or not
         self.distance = 100000
-        self.lane_follow = True
-        self.robot_follow = False
-        self.turn = False
-        self.stop = False
         self.process_intersection = False
         self.vehicle_ahead = False
         self.vehicle_direction = 0 #-1, 0,1 left stright right
@@ -61,9 +58,7 @@ class LaneFollowNode(DTROS):
         
         # Subscriber
         # self.sub_image_compressed = rospy.Subscriber(f"/{self.veh_name}/camera_node/image/compressed", CompressedImage, self.cb_compressed_image)
-        # self.sub_centers = rospy.Subscriber("/{}/duckiebot_detection_node/centers".format(self.host), VehicleCorners, self.cb_centers, queue_size=1)
         self.sub_x = rospy.Subscriber("/{}/duckiebot_detection_node/x".format(self.host), Float32, self.cb_x, queue_size=1)
-        self.sub_circlepattern_image = rospy.Subscriber("/{}/duckiebot_detection_node/detection_image/compressed".format(self.host), CompressedImage, self.cb_circlepattern_image, queue_size=1)
         self.sub_detection = rospy.Subscriber("/{}/duckiebot_detection_node/detection".format(self.host), BoolStamped, self.cb_detection, queue_size=1)
         self.sub_distance_to_robot_ahead = rospy.Subscriber("/{}/duckiebot_distance_node/distance".format(self.host), Float32, self.cb_distance, queue_size=1)
         self.compressed_image_cache = None
@@ -86,7 +81,8 @@ class LaneFollowNode(DTROS):
         else:
             self.offset = 220
             
-        self.velocity = 0.2
+        self.velocity = 0.23
+        self.move_velocity = self.velocity
         self.twist = Twist2DStamped(v=self.velocity, omega=0)
 
         self.P = 0.049
@@ -94,151 +90,72 @@ class LaneFollowNode(DTROS):
         self.last_error = 0
         self.last_time = rospy.get_time()
 
+        self.right_tick_sub = rospy.Subscriber(f'/{self.veh_name}/right_wheel_encoder_node/tick', 
+        WheelEncoderStamped, self.right_tick,  queue_size = 1)
+        self.left_tick_sub = rospy.Subscriber(f'/{self.veh_name}/left_wheel_encoder_node/tick', 
+        WheelEncoderStamped, self.left_tick,  queue_size = 1)
+        self.r = rospy.get_param(f'/{self.veh_name}/kinematics_node/radius', 100)
+
+        self.rt_initial_set = False
+        self.rt = 0
+        self.rt_initial_val = 0
+
+        self.lt_initial_set = False
+        self.lt = 0
+        self.lt_initial_val = 0
+
+        self.prv_rt = 0
+        self.prv_lt = 0
+
+        self.cur_dist = 0
+
         # Shutdown hook
         rospy.on_shutdown(self.hook)
-        
-    def move(self, v, omega):
-        new_cmd = Twist2DStamped()
-        new_cmd.header.stamp = rospy.Time.now()
-        new_cmd.header.frame_id = "~/car_cmd"
-        new_cmd.v = v
-        new_cmd.omega = omega
-        self.pub_car_commands.publish(new_cmd)
-        
-        
-    def cb_centers(self, vehicle_corners):
-        rospy.loginfo(f'centers:{vehicle_corners}')
+
+    def right_tick(self, msg):
+        if not self.rt_initial_set:
+            self.rt_initial_set = True
+            self.rt_initial_val = msg.data
+        self.rt = msg.data - self.rt_initial_val
+        # self.rt_dist = (2 * pi * self.r * self.rt_val) / 135
+
+
+    def left_tick(self, msg):
+        if not self.lt_initial_set:
+            self.lt_initial_set = True
+            self.lt_initial_val = msg.data
+        self.lt = msg.data - self.lt_initial_val
         
     def cb_x(self, x):
-        rospy.loginfo(f'x:{x}')
         self.x = x.data
-        if x < 233:
-            self.vehicle_direction = -1
-            self.turn_left()
-        elif x<= 466:
-            self.vehicle_direction = 0
-            self.go_straight()
-        elif x< 640:
-            self.vehicle_direction = 1
-            self.turn_right()
-    
-    def cb_circlepattern_image(self, compressed_image):
-        pass
+        # if x < 233:
+        #     self.vehicle_direction = -1
+        #     self.turn_left()
+        # elif x<= 466:
+        #     self.vehicle_direction = 0
+        #     self.go_straight()
+        # elif x< 640:
+        #     self.vehicle_direction = 1
+        #     self.turn_right()
     
     def cb_detection(self, bool_stamped):
-        # rospy.loginfo(f'detection bool stamp:{bool_stamped}')
-        self.detection = bool_stamped.data
-        if self.detection:
-            self.robot_follow = True
-        else:
-            self.lane_follow = True
-        rospy.loginfo(f'detection:{self.detection}')    
+        self.detection = bool_stamped.data 
             
     def cb_distance(self, distance):
-        # rospy.loginfo(f'distance:{distance}')
         self.distance = 100 * (distance.data)
-        rospy.loginfo(f"here is the distance{self.distance}")
+        rospy.loginfo(f'Distance from the robot in front: {self.distance}')
         
-        if self.distance < 30:
+        if self.distance < self.safe_dist:
             self.vehicle_ahead = True
         else:
             self.vehicle_ahead = False
-            
-    def control_logic(self):
-        """
-        control logic
-        """
 
-        curr_time = rospy.Time.now()
-        stop_time_diff = curr_time - self.stop_time
-
-        if (self.stop and not self.process_intersection):
-            self.stop_time = curr_time
-
-            self.process_intersection = True
-            # self.set_lights("stop")
-            self.move(0, 0)
-            rospy.sleep(self.stop_duration)
-        
-        elif self.vehicle_ahead:
-            self.move(0, 0)
-            # self.set_lights("stop")
-            
-        elif self.process_intersection:
-            if self.vehicle_direction == 0:
-                # self.set_lights("off")
-                self.go_straight()
-            elif self.vehicle_direction == 1:
-                # self.set_lights("right")
-                self.turn_right()
-            elif self.vehicle_direction == -1:
-                # self.set_lights("left")
-                self.turn_left()
-            else:
-                # self.set_lights("off")
-                self.go_straight()
-            
-            self.process_intersection = False
-        else:
-            v, omega = self.controller.getNextCommand(target_point, current_point)
-
-            self.move(v, omega)
-
-        self.rate.sleep()
-        
-    def turn_right(self):
-        """Make a right turn at an intersection"""
-        self.lane_pid_controller.disable_controller()
-        
-        self.move(v=0.3, omega=0)
-        rospy.sleep(1)
-        self.move(v=0.3, omega = -4)
-        rospy.sleep(1.5)
-        self.stop = False
-        self.lane_pid_controller.enable_controller()
-
-    def turn_left(self):
-        """Make a left turn at an intersection"""
-        self.lane_pid_controller.disable_controller()
-        self.move(v=0.3, omega = 3.5)
-        rospy.sleep(4)
-        self.stop = False
-        self.lane_pid_controller.enable_controller()
-
-    def go_straight(self):
-        """Go straight at an intersection"""
-        self.lane_pid_controller.disable_controller()
-        self.move(v = 0.4, omega = 0.0)
-        rospy.sleep(2)
-        self.cmd_stop = False
-        self.lane_pid_controller.enable_controller()
-    
-
-    def callback(self, msg):
-        img = self.jpeg.decode(msg.data)
-        crop = img[300:-1, :, :]
-        crop_width = crop.shape[1]
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, ROAD_MASK[0], ROAD_MASK[1])
+    def lane_follow(self, image_hsv, crop_width, crop):
+        mask = cv2.inRange(image_hsv, ROAD_MASK[0], ROAD_MASK[1])
         crop = cv2.bitwise_and(crop, crop, mask=mask)
         contours, hierarchy = cv2.findContours(mask,
-                                               cv2.RETR_EXTERNAL,
-                                               cv2.CHAIN_APPROX_NONE)
-
-        # red line detection
-        image = self.bridge.compressed_imgmsg_to_cv2(msg)
-        height, width, _ = image.shape
-        imhsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-        lower_red = np.array([151, 155, 84], dtype = "uint8") 
-        upper_red= np.array([179, 255, 255], dtype = "uint8")
-        
-        
-        mask_red = cv2.inRange(imhsv, lower_red, upper_red)
-        mask_red[0:int(height*(self.height_ratio_red)), 0:width] = 0
-        
-        
-        # Search for lane in front
+                                            cv2.RETR_EXTERNAL,
+                                            cv2.CHAIN_APPROX_NONE)
         max_area = 20
         max_idx = -1
         for i in range(len(contours)):
@@ -252,6 +169,10 @@ class LaneFollowNode(DTROS):
             try:
                 cx = int(M['m10'] / M['m00'])
                 cy = int(M['m01'] / M['m00'])
+                first = M['m10']
+                sec = M['m00']
+                # rospy.loginfo(f'cx:{cx}, first: {first}, sec:{sec}')
+                
                 self.proportional = cx - int(crop_width / 2) + self.offset
                 if DEBUG:
                     cv2.drawContours(crop, contours, max_idx, (0, 255, 0), 3)
@@ -260,10 +181,91 @@ class LaneFollowNode(DTROS):
                 pass
         else:
             self.proportional = None
+        
+        self.drive()
+            
+    def mover(self, image_hsv, crop_width, crop, center=-1):
+        """
+        control logic
+        """
 
-        if DEBUG:
-            rect_img_msg = CompressedImage(format="jpeg", data=self.jpeg.encode(crop))
-            self.pub.publish(rect_img_msg)
+        self.velocity = self.move_velocity
+
+        if not self.process_intersection:
+            # image_hsv = image_hsv[60:,:,:]
+            
+            lower_red = np.array([0,50,50])
+            upper_red = np.array([10,255,255])
+            mask0 = cv2.inRange(image_hsv, lower_red, upper_red)
+
+            # upper mask (170-180)
+            lower_red = np.array([170,50,50])
+            upper_red = np.array([180,255,255])
+            mask1 = cv2.inRange(image_hsv, lower_red, upper_red)
+
+            # join my masks
+            mask = mask0+mask1
+            target_size = np.sum(mask/255.) / mask.size
+            # rospy.loginfo(f'Target size: {target_size}, image size: {image_hsv.shape}')
+
+            if target_size > 0.15:
+                self.move = False
+                self.proportional = int(crop_width / 2)
+                self.drive()
+                rospy.sleep(3)
+                self.move = True
+                self.drive()
+                self.process_intersection = True
+                self.intersection_dist = self.cur_dist + 0.65
+                if center < 260: 
+                    rospy.loginfo('Going Left!')
+                elif center < 380:
+                    rospy.loginfo('Going Straight')
+                else:
+                    rospy.loginfo('Going Right')
+
+        if self.process_intersection and self.cur_dist > self.intersection_dist:
+            self.process_intersection = False
+
+        if self.process_intersection:
+            if center != -1:
+                self.proportional = ((center) - int(crop_width / 2)) / 3.5
+                return
+        
+        self.lane_follow(image_hsv, crop_width, crop)
+
+    def callback(self, msg):
+        img = self.jpeg.decode(msg.data)
+        crop = img[300:-1, :, :]
+        crop_width = crop.shape[1]
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+
+        delta_rt = self.rt - self.prv_rt
+        delta_lt = self.lt - self.prv_lt
+
+        self.prv_rt = self.rt
+        self.prv_lt = self.lt
+
+        delta_rw_dist = (2 * pi * self.r * delta_rt) / 135
+        delta_lw_dist = (2 * pi * self.r * delta_lt) / 135
+
+        delta_dist_cover = (delta_rw_dist + delta_lw_dist)/2
+
+        self.cur_dist = self.cur_dist + delta_dist_cover
+
+        if not self.detection:
+            self.move = True
+            self.mover(hsv, crop_width, crop)
+        elif self.vehicle_ahead:
+            self.move = False
+            self.proportional = int(crop_width / 2)
+            self.drive()
+        else:
+            self.move = True
+            self.mover(hsv, crop_width, crop, center=self.x)
+            
+        self.drive()
+            
 
     def drive(self):
         if self.proportional is None:
@@ -278,8 +280,15 @@ class LaneFollowNode(DTROS):
             self.last_time = rospy.get_time()
             D = d_error * self.D
 
-            self.twist.v = self.velocity
-            self.twist.omega = P + D
+            if self.move:
+                self.twist.v = self.velocity
+                self.twist.omega = P + D
+            else:
+                self.twist.v = 0
+                self.twist.omega = 0
+                
+            rospy.loginfo(f'v:{self.twist.v}, omega: {self.twist.omega}')
+                
             if DEBUG:
                 self.loginfo(self.proportional, P, D, self.twist.omega, self.twist.v)
 
@@ -298,5 +307,5 @@ if __name__ == "__main__":
     node = LaneFollowNode("lanefollow_node")
     rate = rospy.Rate(8)  # 8hz
     while not rospy.is_shutdown():
-        node.drive()
+        # node.drive()
         rate.sleep()

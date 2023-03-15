@@ -23,13 +23,28 @@ class LaneFollowingNode(DTROS):
         self.lane_offset = -100
         self.height_ratio = 0.8
         self.height_ratio_red = 0.8
+        self.stop_time = 0.0
+        self.stop_cooldown = 3.0
+        self.stop_duration = 1.5
+        
+        self.detection = False  # detect tag or not
+        self.distance = 100000
+        self.lane_follow = True
+        self.robot_follow = False
+        self.turn = False
+        self.stop = False
+        self.process_intersection = False
+        self.vehicle_ahead = False
+        self.vehicle_direction = 0 #-1, 0,1 left stright right
+        
         
         # Subscriber
         self.sub_image_compressed = rospy.Subscriber(f"/{self.veh_name}/camera_node/image/compressed", CompressedImage, self.cb_compressed_image)
-        self.sub_centers = rospy.Subscriber("/{}/duckiebot_detection_node/centers".format(self.host), VehicleCorners, self.cb_centers, queue_size=1)
+        # self.sub_centers = rospy.Subscriber("/{}/duckiebot_detection_node/centers".format(self.host), VehicleCorners, self.cb_centers, queue_size=1)
+        self.sub_x = rospy.Subscriber("/{}/duckiebot_detection_node/x".format(self.host), Float32, self.cb_x, queue_size=1)
         self.sub_circlepattern_image = rospy.Subscriber("/{}/duckiebot_detection_node/detection_image/compressed".format(self.host), CompressedImage, self.cb_circlepattern_image, queue_size=1)
         self.sub_detection = rospy.Subscriber("/{}/duckiebot_detection_node/detection".format(self.host), BoolStamped, self.cb_detection, queue_size=1)
-        self.sub_distance_to_robot_ahead = rospy.Subscriber("/{}/duckiebot_distance_node/distance".format(self.host), Float32,self.cb_distance, queue_size=1)
+        self.sub_distance_to_robot_ahead = rospy.Subscriber("/{}/duckiebot_distance_node/distance".format(self.host), Float32, self.cb_distance, queue_size=1)
         self.compressed_image_cache = None
         
         # Publisher
@@ -45,16 +60,43 @@ class LaneFollowingNode(DTROS):
         self.compressed_image_cache = compressed_image
     
     def cb_centers(self, vehicle_corners):
-        pass
+        rospy.loginfo(f'centers:{vehicle_corners}')
+        
+    def cb_x(self, x):
+        rospy.loginfo(f'x:{x}')
+        self.x = x.data
+        if x < 233:
+            self.vehicle_direction = -1
+            self.turn_left()
+        elif x<= 466:
+            self.vehicle_direction = 0
+            self.go_straight()
+        elif x< 640:
+            self.vehicle_direction = 1
+            self.turn_right()
     
     def cb_circlepattern_image(self, compressed_image):
         pass
     
     def cb_detection(self, bool_stamped):
-        pass
-    
+        # rospy.loginfo(f'detection bool stamp:{bool_stamped}')
+        self.detection = bool_stamped.data
+        if self.detection:
+            self.robot_follow = True
+        else:
+            self.lane_follow = True
+        rospy.loginfo(f'detection:{self.detection}')    
+            
     def cb_distance(self, distance):
-        pass
+        # rospy.loginfo(f'distance:{distance}')
+        self.distance = 100 * (distance.data)
+        rospy.loginfo(f"here is the distance{self.distance}")
+        
+        if self.distance < 30:
+            self.vehicle_ahead = True
+        else:
+            self.vehicle_ahead = False
+            
     
     def move(self, v, omega):
         new_cmd = Twist2DStamped()
@@ -64,25 +106,78 @@ class LaneFollowingNode(DTROS):
         new_cmd.omega = omega
         self.pub_car_commands.publish(new_cmd)
         
-    def undistort(self, img):
-        return cv2.undistort(img,
-                             self.camera_mat,
-                             self.dist_coef,
-                             None,
-                             self.camera_mat)
-        
-    def get_med(self, cont):
-        med = 0
-        for c in cont:
-            area = cv2.contourArea(c)
-            mom = cv2.moments(c)    # Get momentum of a contour
-            if mom["m00"] == 0.0:
-                # If denomenator of momentum is 0
-                continue
-            med = int(mom["m10"] / mom["m00"])
-                
-        return med
     
+    def control_logic(self):
+        """
+        control logic
+        """
+
+        curr_time = rospy.Time.now()
+        stop_time_diff = curr_time - self.stop_time
+
+        if (self.stop and stop_time_diff > self.stop_cooldown):
+            self.stop_time = curr_time
+
+            self.process_intersection = True
+            # self.set_lights("stop")
+            self.move(0, 0)
+            rospy.sleep(self.stop_duration)
+        
+        elif self.vehicle_ahead:
+            self.move(0, 0)
+            # self.set_lights("stop")
+            
+        elif self.process_intersection:
+            if self.vehicle_direction == 0:
+                # self.set_lights("off")
+                self.go_straight()
+            elif self.vehicle_direction == 1:
+                # self.set_lights("right")
+                self.turn_right()
+            elif self.vehicle_direction == -1:
+                # self.set_lights("left")
+                self.turn_left()
+            else:
+                # self.set_lights("off")
+                self.go_straight()
+            
+            self.process_intersection = False
+        else:
+            v, omega = self.controller.getNextCommand(target_point, current_point)
+
+            self.move(v, omega)
+
+        self.rate.sleep()
+        
+    
+    def turn_right(self):
+        """Make a right turn at an intersection"""
+        self.lane_pid_controller.disable_controller()
+        
+        self.move(v=0.3, omega=0)
+        rospy.sleep(1)
+        self.move(v=0.3, omega = -4)
+        rospy.sleep(1.5)
+        self.stop = False
+        self.lane_pid_controller.enable_controller()
+
+    def turn_left(self):
+        """Make a left turn at an intersection"""
+        self.lane_pid_controller.disable_controller()
+        self.move(v=0.3, omega = 3.5)
+        rospy.sleep(4)
+        self.stop = False
+        self.lane_pid_controller.enable_controller()
+
+    def go_straight(self):
+        """Go straight at an intersection"""
+        self.lane_pid_controller.disable_controller()
+        self.move(v = 0.4, omega = 0.0)
+        rospy.sleep(2)
+        self.cmd_stop = False
+        self.lane_pid_controller.enable_controller()
+    
+        
     def run(self):
         rate = rospy.Rate(10)
         while not rospy.is_shutdown():
